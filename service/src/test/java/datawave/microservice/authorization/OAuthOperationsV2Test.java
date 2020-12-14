@@ -33,6 +33,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.RequestEntity;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.ClientHttpRequestFactory;
 import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
@@ -55,10 +56,10 @@ import static datawave.security.authorization.DatawaveUser.UserType.USER;
 import static datawave.security.authorization.OAuthConstants.*;
 
 // OAuthServiceTest profile to configure AuthorizationTestUserService with userMap
-// httpsnotallowedcaller profile to use application-httpsnotallowedcaller.yml to test that allowedCaller not enforced for OAuth
+// http profile to use application-http.yml to test that allowedCaller not enforced for OAuth
 @RunWith(SpringRunner.class)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = "spring.main.allow-bean-definition-overriding=true")
-@ActiveProfiles({"OAuthServiceTest", "httpsnotallowedcaller"})
+@ActiveProfiles({"OAuthServiceTest", "http"})
 public class OAuthOperationsV2Test {
     
     @LocalServerPort
@@ -75,9 +76,10 @@ public class OAuthOperationsV2Test {
     
     @Autowired
     private RestClientProperties restClientProperties;
-    
-    private JWTRestTemplate jwtRestTemplate;
-    
+
+    private RestTemplate restTemplate;
+    private AuthorizationTestUtils testUtils;
+
     private static Map<SubjectIssuerDNPair,DatawaveUser> userMap = new LinkedHashMap<>();
     private final SubjectIssuerDNPair userDN = SubjectIssuerDNPair.of("cn=Test User, ou=testing, ou=development, o=testcorp, c=us",
                     "cn=testcorp ca, ou=security, o=testcorp, c=us");
@@ -96,7 +98,8 @@ public class OAuthOperationsV2Test {
         OAuthRestTemplateCustomizer customizer = new OAuthRestTemplateCustomizer(sslContext, restClientProperties);
         // Disable following redirects
         restTemplateBuilder = restTemplateBuilder.additionalCustomizers(customizer);
-        jwtRestTemplate = restTemplateBuilder.build(JWTRestTemplate.class);
+        restTemplate = restTemplateBuilder.build(RestTemplate.class);
+        testUtils = new AuthorizationTestUtils(jwtTokenHandler, restTemplate, "http", webServicePort);
     }
     
     @Test
@@ -129,10 +132,10 @@ public class OAuthOperationsV2Test {
         ResponseEntity<OAuthTokenResponse> tokenEntity = token(dwServer, GRANT_AUTHORIZATION_CODE, CLIENT_ID, CLIENT_SECRET, code, REDIRECT_URI, null);
         Assert.assertEquals(200, tokenEntity.getStatusCode().value());
         
-        OAuthTokenResponse OAuthTokenResponse = tokenEntity.getBody();
+        OAuthTokenResponse oAuthTokenResponse = tokenEntity.getBody();
         Assert.assertEquals(200, tokenEntity.getStatusCode().value());
         
-        String access_token = OAuthTokenResponse.getAccess_token();
+        String access_token = oAuthTokenResponse.getAccess_token();
         Collection<DatawaveUser> usersFromToken = jwtTokenHandler.createUsersFromToken(access_token);
         // The DatawaveUser of both the user and the server should be in the token
         // The server is proxying for the user and must also be authenticated
@@ -140,12 +143,12 @@ public class OAuthOperationsV2Test {
         
         // Call the user endpoint with the access_token to get the primary user
         ResponseEntity<OAuthUserInfo> userResponse = user(access_token, JWTTokenHandler.PRINCIPALS_CLAIM);
-        OAuthUserInfo OAuthUserInfo = userResponse.getBody();
-        Assert.assertEquals(ProxiedEntityUtils.getCommonName(dwUser.getDn().subjectDN()), OAuthUserInfo.getName());
-        Assert.assertEquals(dwUser.getLogin(), OAuthUserInfo.getLogin());
-        Assert.assertEquals(dwUser.getEmail(), OAuthUserInfo.getEmail());
-        Assert.assertEquals(dwUser.getDn(), OAuthUserInfo.getDn());
-        Assert.assertEquals(dwUser.getCreationTime(), OAuthUserInfo.getCreationTime());
+        OAuthUserInfo oAuthUserInfo = userResponse.getBody();
+        Assert.assertEquals(ProxiedEntityUtils.getCommonName(dwUser.getDn().subjectDN()), oAuthUserInfo.getName());
+        Assert.assertEquals(dwUser.getLogin(), oAuthUserInfo.getLogin());
+        Assert.assertEquals(dwUser.getEmail(), oAuthUserInfo.getEmail());
+        Assert.assertEquals(dwUser.getDn(), oAuthUserInfo.getDn());
+        Assert.assertEquals(dwUser.getCreationTime(), oAuthUserInfo.getCreationTime());
         
         // Call the users endpoint with the access_token to get the all users
         ResponseEntity<OAuthUserInfo[]> usersResponse = users(access_token, JWTTokenHandler.PRINCIPALS_CLAIM);
@@ -154,7 +157,7 @@ public class OAuthOperationsV2Test {
         Assert.assertEquals("Primary and proxying user should be returned", 2, users.length);
         
         // Call the token endpoint with the refresh token id
-        String refresh_token = OAuthTokenResponse.getRefresh_token();
+        String refresh_token = oAuthTokenResponse.getRefresh_token();
         ResponseEntity<OAuthTokenResponse> refreshedTokenEntity = token(dwServer, GRANT_REFRESH_TOKEN, CLIENT_ID, CLIENT_SECRET, null, null, refresh_token);
         Assert.assertEquals(200, refreshedTokenEntity.getStatusCode().value());
     }
@@ -341,9 +344,10 @@ public class OAuthOperationsV2Test {
         if (state != null) {
             queryParams.put("state", Collections.singletonList(state));
         }
-        UriComponents authorizeUri = UriComponentsBuilder.newInstance().scheme("https").host("localhost").port(webServicePort)
+        UriComponents authorizeUri = UriComponentsBuilder.newInstance().scheme("http").host("localhost").port(webServicePort)
                         .path("/authorization/v2/oauth/authorize").queryParams(queryParams).build();
-        return jwtRestTemplate.exchange(authUser, HttpMethod.GET, authorizeUri, String.class);
+        RequestEntity requestEntity = testUtils.createRequestEntity(authUser, null, HttpMethod.GET, authorizeUri);
+        return restTemplate.exchange(requestEntity, String.class);
     }
     
     private ResponseEntity<OAuthTokenResponse> token(DatawaveUser user, String grant_type, String client_id, String client_secret, String code,
@@ -368,26 +372,29 @@ public class OAuthOperationsV2Test {
         if (refresh_token != null) {
             queryParams.put("refresh_token", Collections.singletonList(refresh_token));
         }
-        UriComponents tokenUri = UriComponentsBuilder.newInstance().scheme("https").host("localhost").port(webServicePort).path("/authorization/v2/oauth/token")
+        UriComponents tokenUri = UriComponentsBuilder.newInstance().scheme("http").host("localhost").port(webServicePort).path("/authorization/v2/oauth/token")
                         .queryParams(queryParams).build();
-        
-        return jwtRestTemplate.exchange(authUser, HttpMethod.POST, tokenUri, OAuthTokenResponse.class);
+
+        RequestEntity requestEntity = testUtils.createRequestEntity(authUser, null, HttpMethod.POST, tokenUri);
+        return restTemplate.exchange(requestEntity, OAuthTokenResponse.class);
     }
     
     private ResponseEntity<OAuthUserInfo> user(String token, String claim) {
         Collection<DatawaveUser> dwUsers = jwtTokenHandler.createUsersFromToken(token, claim);
         ProxiedUserDetails authUser = new ProxiedUserDetails(dwUsers, dwUsers.stream().findFirst().get().getCreationTime());
-        UriComponents userUri = UriComponentsBuilder.newInstance().scheme("https").host("localhost").port(webServicePort).path("/authorization/v2/oauth/user")
+        UriComponents userUri = UriComponentsBuilder.newInstance().scheme("http").host("localhost").port(webServicePort).path("/authorization/v2/oauth/user")
                         .build();
-        return jwtRestTemplate.exchange(authUser, HttpMethod.GET, userUri, OAuthUserInfo.class);
+        RequestEntity requestEntity = testUtils.createRequestEntity(authUser, null, HttpMethod.GET, userUri);
+        return restTemplate.exchange(requestEntity, OAuthUserInfo.class);
     }
     
     private ResponseEntity<OAuthUserInfo[]> users(String token, String claim) {
         Collection<DatawaveUser> dwUsers = jwtTokenHandler.createUsersFromToken(token, claim);
         ProxiedUserDetails authUser = new ProxiedUserDetails(dwUsers, dwUsers.stream().findFirst().get().getCreationTime());
-        UriComponents userUri = UriComponentsBuilder.newInstance().scheme("https").host("localhost").port(webServicePort).path("/authorization/v2/oauth/users")
+        UriComponents userUri = UriComponentsBuilder.newInstance().scheme("http").host("localhost").port(webServicePort).path("/authorization/v2/oauth/users")
                         .build();
-        return jwtRestTemplate.exchange(authUser, HttpMethod.GET, userUri, OAuthUserInfo[].class);
+        RequestEntity requestEntity = testUtils.createRequestEntity(authUser, null, HttpMethod.GET, userUri);
+        return restTemplate.exchange(requestEntity, OAuthUserInfo[].class);
     }
     
     public static Map<String,List<String>> splitQuery(URL url) throws UnsupportedEncodingException {
